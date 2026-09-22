@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GRAIN ROT</title>
+  <style>
+    :root {
+      --bg: #090b0e;
+      --ink: #edf4ef;
+      --muted: #b9c4b9;
+      --amber: #f5c76a;
+      --danger: #d05952;
+      --green: #8fe1a6;
+      --panel: rgba(12, 15, 18, 0.72);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: radial-gradient(circle at top, #1a1a17 0%, #090b0e 52%, #050608 100%);
+      color: var(--ink);
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      overflow: hidden;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+    }
+
+    .shell {
+      position: relative;
+      width: min(96vw, 960px);
+      height: min(90vh, 540px);
+      background: rgba(12, 15, 18, 0.78);
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.25), 0 28px 56px rgba(0,0,0,0.45);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .hud-top {
+      position: absolute;
+      top: 14px;
+      left: 18px;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .game-title {
+      font-size: 1.1rem;
+      letter-spacing: 0.18rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      text-shadow: 0 0 10px rgba(245, 199, 106, 0.5);
+    }
+
+    .tagline {
+      font-size: 0.7rem;
+      letter-spacing: 0.12rem;
+      text-transform: uppercase;
+      color: var(--muted);
+      opacity: 0.82;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: #090b0e;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hud-top">
+      <div class="game-title">GRAIN ROT</div>
+      <div class="tagline">Silo Survival Prototype</div>
+    </div>
+    <canvas id="game" width="960" height="540"></canvas>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const TILE = 48;
+
+    const MAP = [
+      '####################',
+      '#..................#',
+      '#.####.#####.####.#',
+      '#......#...#......#',
+      '#.##.#.#.#.#.##.#.#',
+      '#....#...#...#....#',
+      '#.##.###.#.###.##.#',
+      '#........#........#',
+      '#.##.#.#.#.#.#.##.#',
+      '#....#...#...#....#',
+      '#..................#',
+      '####################',
+    ];
+
+    const keys = {};
+    const state = { mode: 'playing', lastTime: 0 };
+
+    const player = {
+      x: 2.5 * TILE,
+      y: 9.5 * TILE,
+      radius: 12,
+      speed: 165,
+      facing: 0,
+      flashlightOn: true,
+      battery: 100,
+      sanity: 100,
+      health: 100,
+      seeds: 0,
+    };
+
+    const exitDoor = { x: 16.5 * TILE, y: 2.5 * TILE, radius: 22 };
+
+    const seedSpawns = [
+      { x: 3.5 * TILE, y: 2.5 * TILE },
+      { x: 8.5 * TILE, y: 7.5 * TILE },
+      { x: 13.5 * TILE, y: 9.5 * TILE },
+    ];
+
+    const seeds = seedSpawns.map((seed, index) => ({ ...seed, radius: 10, collected: false, id: index }));
+
+    const enemies = [
+      { x: 7.5 * TILE, y: 3.5 * TILE, radius: 14, speed: 52, drift: 0, dir: 0 },
+      { x: 11.5 * TILE, y: 7.5 * TILE, radius: 13, speed: 55, drift: 2, dir: Math.PI },
+      { x: 15.5 * TILE, y: 8.5 * TILE, radius: 15, speed: 58, drift: 1, dir: Math.PI / 2 },
+    ];
+
+    const particles = [];
+
+    function clamp(v, min, max) {
+      return Math.min(max, Math.max(min, v));
+    }
+
+    function isWallAt(x, y) {
+      const tileX = Math.floor(x / TILE);
+      const tileY = Math.floor(y / TILE);
+      if (tileY < 0 || tileY >= MAP.length || tileX < 0 || tileX >= MAP[0].length) return true;
+      return MAP[tileY][tileX] === '#';
+    }
+
+    function collidesWithWall(x, y, radius) {
+      const points = [
+        [x - radius, y - radius],
+        [x + radius, y - radius],
+        [x - radius, y + radius],
+        [x + radius, y + radius],
+      ];
+      return points.some(([px, py]) => isWallAt(px, py));
+    }
+
+    function addParticles(x, y, color, count) {
+      for (let i = 0; i < count; i++) {
+        particles.push({
+          x,
+          y,
+          vx: (Math.random() - 0.5) * 80,
+          vy: (Math.random() - 0.5) * 80,
+          life: 0.6 + Math.random() * 0.8,
+          size: 2 + Math.random() * 3,
+          color,
+        });
+      }
+    }
+
+    function handleInput(dt) {
+      let dx = 0;
+      let dy = 0;
+
+      if (keys.w || keys.arrowup) dy -= 1;
+      if (keys.s || keys.arrowdown) dy += 1;
+      if (keys.a || keys.arrowleft) dx -= 1;
+      if (keys.d || keys.arrowright) dx += 1;
+
+      const len = Math.hypot(dx, dy) || 1;
+      dx /= len;
+      dy /= len;
+
+      const nextX = player.x + dx * player.speed * dt;
+      if (!collidesWithWall(nextX, player.y, player.radius)) player.x = nextX;
+
+      const nextY = player.y + dy * player.speed * dt;
+      if (!collidesWithWall(player.x, nextY, player.radius)) player.y = nextY;
+
+      if (dx !== 0 || dy !== 0) {
+        player.facing = Math.atan2(dy, dx);
+      }
+
+      if (keys.f && !keys.fHeld) {
+        player.flashlightOn = !player.flashlightOn;
+        addParticles(player.x, player.y, player.flashlightOn ? '#f5d57a' : '#b8beca', 8);
+      }
+      keys.fHeld = keys.f;
+    }
+
+    function updatePlayer(dt) {
+      handleInput(dt);
+
+      if (player.flashlightOn && player.battery > 0) {
+        player.battery = clamp(player.battery - dt * 9, 0, 100);
+      } else {
+        player.battery = clamp(player.battery + dt * 5, 0, 100);
+      }
+
+      if (!player.flashlightOn) {
+        player.sanity = clamp(player.sanity - dt * 7, 0, 100);
+      } else {
+        player.sanity = clamp(player.sanity + dt * 2, 0, 100);
+      }
+
+      for (const seed of seeds) {
+        if (!seed.collected && Math.hypot(player.x - seed.x, player.y - seed.y) < 24) {
+          seed.collected = true;
+          player.seeds += 1;
+          addParticles(seed.x, seed.y, '#8fe1a6', 12);
+        }
+      }
+
+      const nearDanger = enemies.some((enemy) => {
+        const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
+        return dist < 150;
+      });
+
+      if (nearDanger) {
+        player.sanity = clamp(player.sanity - dt * 12, 0, 100);
+      }
+
+      if (Math.hypot(player.x - exitDoor.x, player.y - exitDoor.y) < exitDoor.radius + player.radius) {
+        if (player.seeds >= 3) {
+          state.mode = 'won';
+        }
+      }
+
+      if (player.sanity <= 0) state.mode = 'lost';
+      if (player.battery <= 0) player.flashlightOn = false;
+    }
+
+    function updateEnemies(dt) {
+      for (const enemy of enemies) {
+        const dx = player.x - enemy.x;
+        const dy = player.y - enemy.y;
+        const dist = Math.hypot(dx, dy);
+
+        let flee = false;
+        if (player.flashlightOn && dist < 220) {
+          const angleToPlayer = Math.atan2(dy, dx);
+          const diff = Math.abs(Math.atan2(Math.sin(angleToPlayer - player.facing), Math.cos(angleToPlayer - player.facing)));
+          if (diff < 1.2) flee = true;
+        }
+
+        let moveX = 0;
+        let moveY = 0;
+
+        if (dist < 230 && !flee) {
+          moveX = dx / (dist || 1);
+          moveY = dy / (dist || 1);
+        } else if (flee) {
+          moveX = -dx / (dist || 1);
+          moveY = -dy / (dist || 1);
+        } else {
+          enemy.drift -= dt;
+          if (enemy.drift <= 0) {
+            enemy.drift = 2 + Math.random() * 3;
+            enemy.dir = Math.random() * Math.PI * 2;
+          }
+          moveX = Math.cos(enemy.dir);
+          moveY = Math.sin(enemy.dir);
+        }
+
+        const nextX = enemy.x + moveX * enemy.speed * dt;
+        if (!collidesWithWall(nextX, enemy.y, enemy.radius)) enemy.x = nextX;
+
+        const nextY = enemy.y + moveY * enemy.speed * dt;
+        if (!collidesWithWall(enemy.x, nextY, enemy.radius)) enemy.y = nextY;
+
+        if (dist < enemy.radius + player.radius + 6) {
+          player.health = clamp(player.health - dt * 20, 0, 100);
+          if (player.health <= 0) state.mode = 'lost';
+          player.sanity = clamp(player.sanity - dt * 40, 0, 100);
+        }
+      }
+    }
+
+    function updateParticles(dt) {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= dt;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+    }
+
+    function drawFloor() {
+      for (let row = 0; row < MAP.length; row++) {
+        for (let col = 0; col < MAP[row].length; col++) {
+          const x = col * TILE;
+          const y = row * TILE;
+          ctx.fillStyle = MAP[row][col] === '#' ? '#171b1c' : '#101418';
+          ctx.fillRect(x, y, TILE, TILE);
+          if (MAP[row][col] !== '#') {
+            ctx.fillStyle = 'rgba(255,255,255,0.02)';
+            ctx.fillRect(x + 6, y + 6, TILE - 12, TILE - 12);
+          }
+        }
+      }
+    }
+
+    function drawExit() {
+      ctx.save();
+      ctx.translate(exitDoor.x, exitDoor.y);
+      ctx.fillStyle = player.seeds >= 3 ? '#8fe1a6' : '#6a6d6d';
+      ctx.fillRect(-15, -22, 30, 44);
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.fillRect(-10, -15, 20, 30);
+      ctx.restore();
+    }
+
+    function drawSeeds() {
+      for (const seed of seeds) {
+        if (seed.collected) continue;
+        ctx.save();
+        ctx.translate(seed.x, seed.y);
+        ctx.beginPath();
+        ctx.fillStyle = '#d9f5d5';
+        ctx.arc(0, 0, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawEnemies() {
+      for (const enemy of enemies) {
+        ctx.beginPath();
+        ctx.fillStyle = '#a54040';
+        ctx.arc(enemy.x, enemy.y, enemy.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
+        ctx.arc(enemy.x, enemy.y, enemy.radius + 12, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawPlayer() {
+      ctx.save();
+      ctx.translate(player.x, player.y);
+
+      ctx.beginPath();
+      ctx.fillStyle = '#e5e4d9';
+      ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = '#d1c9af';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(player.facing) * 18, Math.sin(player.facing) * 18);
+      ctx.stroke();
+
+      if (player.flashlightOn && player.battery > 0) {
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, 220, player.facing - 0.85, player.facing + 0.85);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(255, 220, 130, 0.10)';
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    function drawParticles() {
+      for (const p of particles) {
+        ctx.beginPath();
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = Math.max(0, p.life);
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    function drawHud() {
+      ctx.fillStyle = 'rgba(6,9,12,0.58)';
+      ctx.fillRect(12, 12, 260, 90);
+
+      ctx.fillStyle = '#f2efe7';
+      ctx.font = 'bold 18px Segoe UI';
+      ctx.fillText('SEED CORE', 22, 36);
+      ctx.fillText(`${player.seeds}/3`, 22, 60);
+
+      ctx.fillStyle = '#f5c76a';
+      ctx.fillRect(22, 72, 140, 10);
+      ctx.fillStyle = '#8fe1a6';
+      ctx.fillRect(22, 72, (player.battery / 100) * 140, 10);
+
+      ctx.fillStyle = '#dfe8ff';
+      ctx.fillText(`SANITY ${Math.round(player.sanity)}`, 180, 36);
+      ctx.fillText(`HEALTH ${Math.round(player.health)}`, 180, 60);
+
+      if (state.mode === 'won') {
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#e9f4e8';
+        ctx.font = 'bold 42px Segoe UI';
+        ctx.fillText('YOU ESCAPED THE SILO', 220, 250);
+        ctx.font = '18px Segoe UI';
+        ctx.fillText('Press R to restart', 380, 300);
+      }
+
+      if (state.mode === 'lost') {
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#f1d9d5';
+        ctx.font = 'bold 42px Segoe UI';
+        ctx.fillText('THE ROT FOUND YOU', 220, 250);
+        ctx.font = '18px Segoe UI';
+        ctx.fillText('Press R to restart', 380, 300);
+      }
+
+      if (state.mode === 'playing') {
+        const objective = player.seeds < 3 ? `Collect the hidden seed cores (${player.seeds}/3)` : 'Return to the exit gate';
+        ctx.fillStyle = 'rgba(7, 10, 12, 0.6)';
+        ctx.fillRect(420, 14, 520, 44);
+        ctx.fillStyle = '#edf4ef';
+        ctx.font = '16px Segoe UI';
+        ctx.fillText(objective, 438, 40);
+      }
+    }
+
+    function render() {
+      drawFloor();
+      drawExit();
+      drawSeeds();
+      drawEnemies();
+      drawPlayer();
+      drawParticles();
+      drawHud();
+    }
+
+    function update(dt) {
+      if (state.mode !== 'playing') return;
+      updatePlayer(dt);
+      updateEnemies(dt);
+      updateParticles(dt);
+    }
+
+    function gameLoop(timestamp) {
+      const dt = Math.min((timestamp - state.lastTime) / 1000 || 0.016, 0.033);
+      state.lastTime = timestamp;
+      update(dt);
+      render();
+      requestAnimationFrame(gameLoop);
+    }
+
+    window.addEventListener('keydown', (event) => {
+      const key = event.key.toLowerCase();
+      keys[key] = true;
+      keys[event.key] = true;
+
+      if (key === 'r' && state.mode !== 'playing') {
+        location.reload();
+      }
+
+      if (key === 'f') {
+        keys.f = true;
+      }
+
+      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+        event.preventDefault();
+      }
+    });
+
+    window.addEventListener('keyup', (event) => {
+      const key = event.key.toLowerCase();
+      keys[key] = false;
+      keys[event.key] = false;
+
+      if (key === 'f') {
+        keys.f = false;
+        keys.fHeld = false;
+      }
+    });
+
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
